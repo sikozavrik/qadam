@@ -43,3 +43,15 @@ class Booking(Base):
     status = Column(String(20), default="confirmed")
     qr_code = Column(String(100), unique=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class Payment(Base):
+    """История платежей. Номер карты и CVV НЕ хранятся, только последние 4 цифры."""
+    __tablename__ = "payments"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    tx_id = Column(String(30), unique=True, nullable=False)
+    amount_kzt = Column(Integer, nullable=False)
+    plan_months = Column(Integer, nullable=False)
+    card_last4 = Column(String(4))
+    status = Column(String(20), default="paid")
+    created_at = Column(DateTime, default=datetime.utcnow)

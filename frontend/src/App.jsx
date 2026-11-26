@@ -1,7 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { Dumbbell, Snowflake, LogOut, Plus, QrCode, CreditCard, X, ShieldAlert, Users, TrendingUp, Calendar, MapPin, CheckCircle2, AlertCircle, Trophy, Flame, Footprints, ScanLine } from 'lucide-react';
-
+import QRCode from 'qrcode';
+import { Dumbbell, Snowflake, LogOut, Plus, QrCode, CreditCard, X, ShieldAlert, Users, TrendingUp, Calendar, MapPin, CheckCircle2, AlertCircle, Trophy, Flame, Footprints, ScanLine, Bell } from 'lucide-react';
+import UpgradesPanel from "./components/UpgradesPanel";
 const API_URL = 'http://127.0.0.1:8000';
+
+const PLAN_PRICES = { 1: 14990, 3: 39990 };
+const formatKzt = (n) => `${Number(n).toLocaleString('ru-RU')} ₸`;
+
+// Настоящий QR-код, сгенерированный из кода брони
+function QrImage({ text, dim }) {
+  const [src, setSrc] = useState('');
+  useEffect(() => {
+    QRCode.toDataURL(text, { width: 160, margin: 1 }).then(setSrc).catch(() => setSrc(''));
+  }, [text]);
+  return src ? (
+    <img src={src} alt={text} className={`w-20 h-20 rounded-xl bg-white p-1 shrink-0 ${dim ? 'opacity-30 grayscale' : ''}`} />
+  ) : (
+    <div className="w-20 h-20 rounded-xl bg-slate-800 shrink-0"></div>
+  );
+}
 
 const STATUS_LABELS = { confirmed: 'Подтверждена', visited: 'Посещена ✅', cancelled: 'Отменена' };
 const LEVEL_STEPS = [0, 5, 15, 30, 60];
@@ -48,14 +65,48 @@ export default function App() {
   const [leaderboard, setLeaderboard] = useState([]);
   const [adminStats, setAdminStats] = useState(null);
   const [checkinCode, setCheckinCode] = useState('');
+  const [payments, setPayments] = useState([]);
 
   // Toast-уведомления вместо alert
   const [toast, setToast] = useState(null);
   const notify = (msg, type) => {
     const t = type || (/успешн|активирован|добавлена|опубликована|подтвержд/i.test(msg) ? 'success' : 'error');
     setToast({ msg, type: t });
-    setTimeout(() => setToast(null), 3500);
+    setTimeout(() => setToast(null), t === 'info' ? 9000 : 3500);
   };
+
+  // Обновить данные пользователя после действий в панели Qadam+ (оплата, бронь, чекин)
+  const refreshAll = async () => {
+    try {
+      const res = await fetch(`${API_URL}/users/${user.id}`);
+      if (res.ok) setUser(await res.json());
+    } catch (e) { console.error(e); }
+    fetchBookings();
+    fetchStats();
+    fetchPayments();
+    fetchWorkouts();
+  };
+
+  // Автонапоминания: раз в минуту проверяем ближайшие тренировки и показываем уведомление один раз
+  useEffect(() => {
+    if (!user || user.role === 'admin') return;
+    const check = async () => {
+      try {
+        const res = await fetch(`${API_URL}/reminders/upcoming?phone=${encodeURIComponent(user.phone)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const seen = JSON.parse(localStorage.getItem('qadam_seen_reminders') || '[]');
+        const fresh = (data.reminders || []).filter((r) => !seen.includes(r.booking_id));
+        if (fresh.length > 0) {
+          notify(fresh[0].message, 'info');
+          localStorage.setItem('qadam_seen_reminders', JSON.stringify([...seen, fresh[0].booking_id].slice(-100)));
+        }
+      } catch (e) { console.error(e); }
+    };
+    check();
+    const timer = setInterval(check, 60000);
+    return () => clearInterval(timer);
+  }, [user]);
 
   const loginUser = (u) => {
     localStorage.setItem('qadam_user_id', String(u.id));
@@ -110,6 +161,7 @@ export default function App() {
     if (user) {
       fetchBookings();
       fetchStats();
+      fetchPayments();
       if (user.role === 'admin') {
         fetchAllUsers();
         fetchAdminStats();
@@ -142,6 +194,13 @@ export default function App() {
     try {
       const res = await fetch(`${API_URL}/users/${user.id}/bookings`);
       setBookings(await res.json());
+    } catch (e) { console.error(e); }
+  };
+
+  const fetchPayments = async () => {
+    try {
+      const res = await fetch(`${API_URL}/users/${user.id}/payments`);
+      if (res.ok) setPayments(await res.json());
     } catch (e) { console.error(e); }
   };
 
@@ -220,16 +279,27 @@ export default function App() {
     if (!/^\d{3,4}$/.test(cardCvv)) { notify('Неверный CVV', 'error'); return; }
 
     try {
-      const res = await fetch(`${API_URL}/users/${user.id}/subscribe?months=${selectedMonths}`, { method: 'POST' });
-      if (!res.ok) throw new Error('Ошибка оплаты');
-      setUser(await res.json());
+      const res = await fetch(`${API_URL}/payments/card`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: user.phone,
+          card_number: cardNumber.replace(/\s/g, ''),
+          expiry: cardExpiry,
+          cvv: cardCvv,
+          plan_months: selectedMonths,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Ошибка оплаты');
       setShowCardModal(false);
       setCardNumber('');
       setCardExpiry('');
       setCardCvv('');
-      notify('Оплата прошла успешно! Абонемент Qadam активирован 🎉');
-    } catch (e) { 
-      notify('Ошибка при обработке платежа'); 
+      notify(`Оплата прошла успешно (${data.payment.tx_id})! Абонемент Qadam активирован 🎉`);
+      refreshAll();
+    } catch (e) {
+      notify(e.message || 'Ошибка при обработке платежа', 'error');
     }
   };
 
@@ -293,7 +363,7 @@ const toggleFreeze = async () => {
       const res = await fetch(`${API_URL}/bookings/${encodeURIComponent(checkinCode.trim())}/checkin`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || 'Ошибка чекина');
-      notify(`${data.user_name}: «${data.workout_title}» — чекин подтверждён! +1 шаг`, 'success');
+      notify(`${data.user_name}: «${data.workout_title}» — чекин подтверждён! +1 qadam алға 🚀`, 'success');
       setCheckinCode('');
       fetchAdminStats();
     } catch (err) { notify(err.message, 'error'); }
@@ -336,8 +406,8 @@ const toggleFreeze = async () => {
   };
 
   const toastEl = toast && (
-    <div className={`fixed top-6 right-6 z-[100] max-w-sm px-5 py-4 rounded-2xl border shadow-2xl backdrop-blur-xl font-semibold text-sm flex items-start gap-3 ${toast.type === 'success' ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' : 'bg-red-500/15 border-red-500/40 text-red-300'}`}>
-      {toast.type === 'success' ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : <AlertCircle className="w-5 h-5 shrink-0" />}
+    <div className={`fixed top-6 right-6 z-[100] max-w-sm px-5 py-4 rounded-2xl border shadow-2xl backdrop-blur-xl font-semibold text-sm flex items-start gap-3 ${toast.type === 'success' ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' : toast.type === 'info' ? 'bg-amber-500/15 border-amber-500/40 text-amber-200' : 'bg-red-500/15 border-red-500/40 text-red-300'}`}>
+      {toast.type === 'success' ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : toast.type === 'info' ? <Bell className="w-5 h-5 shrink-0" /> : <AlertCircle className="w-5 h-5 shrink-0" />}
       <span>{toast.msg}</span>
     </div>
   );
@@ -438,6 +508,8 @@ const toggleFreeze = async () => {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-emerald-500 selection:text-slate-950">
       {toastEl}
+      <div className="pointer-events-none fixed -top-40 -left-40 w-[30rem] h-[30rem] bg-emerald-500/10 rounded-full blur-3xl"></div>
+      <div className="pointer-events-none fixed -bottom-40 -right-40 w-[30rem] h-[30rem] bg-purple-500/10 rounded-full blur-3xl"></div>
       {/* Навигационная панель */}
       <header className="border-b border-slate-800/80 bg-slate-900/40 backdrop-blur-xl sticky top-0 z-50 px-6 py-4 flex flex-wrap justify-between items-center gap-4">
         <div className="flex items-center gap-3">
@@ -446,12 +518,12 @@ const toggleFreeze = async () => {
           </div>
           <span className="text-xl font-black tracking-wider bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">QADAM</span>
         </div>
-
-        <nav className="flex items-center gap-1.5 bg-slate-900/80 border border-slate-800 p-1.5 rounded-2xl">
+        <nav className="flex items-center gap-1.5 bg-slate-900/80 border border-slate-800 p-1.5 rounded-2xl max-w-full overflow-x-auto whitespace-nowrap">
           <button onClick={() => setTab('studios')} className={`px-4 py-2 rounded-xl font-semibold text-sm transition-all ${tab === 'studios' ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20' : 'text-slate-400 hover:text-white'}`}>Студии</button>
           <button onClick={() => setTab('workouts')} className={`px-4 py-2 rounded-xl font-semibold text-sm transition-all ${tab === 'workouts' ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20' : 'text-slate-400 hover:text-white'}`}>Расписание</button>
           <button onClick={() => setTab('profile')} className={`px-4 py-2 rounded-xl font-semibold text-sm transition-all ${tab === 'profile' ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20' : 'text-slate-400 hover:text-white'}`}>Абонемент</button>
           <button onClick={() => setTab('progress')} className={`px-4 py-2 rounded-xl font-semibold text-sm transition-all ${tab === 'progress' ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20' : 'text-slate-400 hover:text-white'}`}>Прогресс</button>
+          <button onClick={() => setTab('upgrades')} className={`px-4 py-2 rounded-xl font-semibold text-sm transition-all ${tab === 'upgrades' ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20' : 'text-slate-400 hover:text-white'}`}>Qadam+</button>
           {user.role === 'admin' && (
             <button onClick={() => setTab('admin')} className={`px-4 py-2 rounded-xl font-semibold text-sm transition-all ${tab === 'admin' ? 'bg-purple-500 text-slate-950 shadow-md shadow-purple-500/20' : 'text-purple-400 hover:bg-purple-500/10'}`}>👑 Панель админа</button>
           )}
@@ -475,7 +547,8 @@ const toggleFreeze = async () => {
       </header>
 
       {/* Основной контент */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6 md:p-8">
+      <main className="relative z-10 flex-1 max-w-7xl w-full mx-auto p-6 md:p-8">
+        <div key={tab} className="animate-fade-in">
         {tab === 'studios' && (
           <div>
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
@@ -616,10 +689,10 @@ const toggleFreeze = async () => {
                   <p className="text-xs text-slate-400 uppercase font-bold tracking-wider">Продлить или активировать</p>
                   <div className="grid grid-cols-2 gap-3">
                     <button onClick={() => openCardModal(1)} className="bg-emerald-500 text-slate-950 font-bold py-3.5 rounded-2xl hover:bg-emerald-400 transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20">
-                      <CreditCard className="w-4 h-4" /> 1 месяц
+                      <CreditCard className="w-4 h-4" /> 1 месяц · {formatKzt(PLAN_PRICES[1])}
                     </button>
                     <button onClick={() => openCardModal(3)} className="bg-slate-800 hover:bg-slate-700 text-white font-bold py-3.5 rounded-2xl transition flex items-center justify-center gap-2 border border-slate-700">
-                      <CreditCard className="w-4 h-4 text-emerald-400" /> 3 месяца
+                      <CreditCard className="w-4 h-4 text-emerald-400" /> 3 месяца · {formatKzt(PLAN_PRICES[3])}
                     </button>
                   </div>
                 </div>
@@ -628,6 +701,23 @@ const toggleFreeze = async () => {
               <button onClick={toggleFreeze} className="mt-6 w-full bg-slate-950 hover:bg-slate-900 border border-slate-800 py-3.5 rounded-2xl font-bold flex items-center justify-center gap-2 text-slate-300 transition">
                 <Snowflake className="w-5 h-5 text-cyan-400" /> {user.is_frozen ? 'Разморозить абонемент' : 'Заморозить абонемент'}
               </button>
+
+              {payments.length > 0 && (
+                <div className="mt-8">
+                  <p className="text-xs text-slate-400 uppercase font-bold tracking-wider mb-3">История платежей</p>
+                  <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+                    {payments.map((p) => (
+                      <div key={p.id} className="flex justify-between items-center bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-2.5 text-xs">
+                        <div>
+                          <div className="font-mono font-bold text-emerald-400">{p.tx_id}</div>
+                          <div className="text-slate-500">{new Date(p.created_at).toLocaleDateString()} · карта •••• {p.card_last4} · {p.plan_months} мес.</div>
+                        </div>
+                        <div className="font-black text-white">{formatKzt(p.amount_kzt)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Бронирования и QR */}
@@ -643,9 +733,7 @@ const toggleFreeze = async () => {
                   bookings.map((b) => (
                     <div key={b.id} className="bg-slate-950/80 p-5 rounded-2xl border border-slate-800 flex justify-between items-center">
                       <div className="flex items-center gap-4">
-                        <div className="bg-emerald-500/10 p-3 rounded-2xl border border-emerald-500/20">
-                          <QrCode className="w-7 h-7 text-emerald-400" />
-                        </div>
+                        <QrImage text={b.qr_code} dim={b.status !== 'confirmed'} />
                         <div>
                           {b.workout_title && <div className="font-bold text-white">{b.workout_title}</div>}
                           {b.start_time && <div className="text-xs text-slate-400">{b.studio_name ? b.studio_name + ' · ' : ''}{new Date(b.start_time).toLocaleString()}</div>}
@@ -671,7 +759,7 @@ const toggleFreeze = async () => {
           <div className="space-y-8">
             <div>
               <h2 className="text-3xl font-black tracking-tight">Мой прогресс</h2>
-              <p className="text-slate-400 text-sm mt-1">Каждое подтверждённое посещение — один шаг (қадам). Занимайтесь каждую неделю, чтобы не прервать серию.</p>
+              <p className="text-slate-400 text-sm mt-1">Каждая подтверждённая тренировка — это 1 qadam алға («шаг вперёд»). Занимайтесь каждую неделю, чтобы не прервать серию.</p>
             </div>
 
             {!stats ? (
@@ -682,7 +770,7 @@ const toggleFreeze = async () => {
                   <div className="bg-slate-900/60 border border-slate-800 rounded-3xl p-6 flex items-center gap-4">
                     <div className="bg-emerald-500/10 border border-emerald-500/30 p-4 rounded-2xl text-emerald-400"><Footprints className="w-8 h-8" /></div>
                     <div>
-                      <div className="text-slate-400 text-xs font-bold uppercase">Шагов</div>
+                      <div className="text-slate-400 text-xs font-bold uppercase">Qadam</div>
                       <div className="text-3xl font-black mt-1">{stats.steps}</div>
                     </div>
                   </div>
@@ -709,7 +797,7 @@ const toggleFreeze = async () => {
                       <div className="text-2xl font-black text-emerald-400">{stats.level}</div>
                     </div>
                     <div className="text-xs text-slate-400">
-                      {stats.next_level_at != null ? `${stats.steps} / ${stats.next_level_at} шагов до следующего уровня` : 'Максимальный уровень достигнут 🎉'}
+                      {stats.next_level_at != null ? `${stats.steps} / ${stats.next_level_at} qadam до следующего уровня` : 'Максимальный уровень достигнут 🎉'}
                     </div>
                   </div>
                   <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden">
@@ -735,7 +823,7 @@ const toggleFreeze = async () => {
             )}
 
             <div className="bg-slate-900/60 border border-slate-800 rounded-3xl p-8">
-              <h3 className="text-xl font-black mb-4 flex items-center gap-2"><Trophy className="w-5 h-5 text-purple-400" /> Топ-10 по шагам</h3>
+              <h3 className="text-xl font-black mb-4 flex items-center gap-2"><Trophy className="w-5 h-5 text-purple-400" /> Топ-10 по qadam</h3>
               {leaderboard.length === 0 ? (
                 <p className="text-slate-500 text-sm">Рейтинг появится после первых подтверждённых посещений.</p>
               ) : (
@@ -756,6 +844,16 @@ const toggleFreeze = async () => {
         )}
 
         {/* Профессиональная Админ-панель */}
+        {tab === 'upgrades' && (
+          <div>
+            <div className="mb-8">
+              <h2 className="text-3xl font-black tracking-tight">Qadam+</h2>
+              <p className="text-slate-400 text-sm mt-1">Оплата, рабочий QR-код, бейджи, кэш расписания и автонапоминания</p>
+            </div>
+            <UpgradesPanel defaultPhone={user?.phone || "+77059998877"} onChange={refreshAll} />
+          </div>
+        )}
+
         {tab === 'admin' && user.role === 'admin' && (
           <div className="space-y-8">
             {/* Статистика / Дашборд */}
@@ -865,6 +963,7 @@ const toggleFreeze = async () => {
             </div>
           </div>
         )}
+        </div>
       </main>
 
       {/* Профессиональное модальное окно оплаты */}
@@ -924,7 +1023,7 @@ const toggleFreeze = async () => {
                 </div>
               </div>
               <button type="submit" className="w-full bg-emerald-500 text-slate-950 font-bold py-4 rounded-2xl hover:bg-emerald-400 transition shadow-xl shadow-emerald-500/20 mt-4">
-                Оплатить подписку
+                Оплатить {formatKzt(PLAN_PRICES[selectedMonths])}
               </button>
             </form>
           </div>

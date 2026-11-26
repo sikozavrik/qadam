@@ -3,5 +3,8 @@
     "@tailwindcss/vite": "^4.3.5",
     "lucide-react": "^1.75.0",
     "tailwindcss": "^4.3.5"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
   }
 }
